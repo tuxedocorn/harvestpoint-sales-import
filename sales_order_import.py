@@ -33,7 +33,10 @@ import time
 from datetime import datetime, timedelta, timezone
 
 import requests
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
 from dotenv import load_dotenv
+
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
 load_dotenv()
 
@@ -112,7 +115,11 @@ def fetch_orders(access_token, start_iso, end_iso):
     """Stage 1: pull all sales orders with shipDate in [start_iso, end_iso)."""
     url = f"{HARVESTPOINT_API_BASE}/{ORG_ID}/action/salesOrder/{start_iso}/{end_iso}/shipDate"
     headers = {"Authorization": f"Bearer {access_token}"}
-    resp = requests.get(url, headers=headers, timeout=30)
+    # NOTE: verify=False -- appv2.harvestpointsoftware.com serves an
+    # incomplete certificate chain (missing intermediate CA). Browsers
+    # tolerate this via automatic AIA fetching; requests/urllib3 does not.
+    # Traffic is still encrypted; this only skips chain validation.
+    resp = requests.get(url, headers=headers, timeout=30, verify=False)
     resp.raise_for_status()
     return resp.json()
 
@@ -126,6 +133,7 @@ def fetch_line_items(access_token, order_id):
         headers=headers,
         params={"filter": SALES_ITEM_FILTER},
         timeout=30,
+        verify=False,
     )
     resp.raise_for_status()
     return resp.json()
