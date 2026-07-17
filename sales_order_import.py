@@ -2,12 +2,18 @@
 """
 Harvestpoint Sales Order -> Smartsheet import
 
-Pulls all sales orders with a ship date in the next N days (default 60),
-then for each order pulls the line-item detail (product/quantity/sellPrice)
-and writes one row per line item to a Smartsheet sheet. Each run fully
-repaves the sheet (deletes all existing rows, inserts fresh rows) since
-this is a point-in-time overview sourced entirely from Harvestpoint -- no
-editing happens in Smartsheet itself.
+Pulls all sales orders with a ship date from N days ago through M days in
+the future (default 5 days back, 60 days forward), then for each order
+pulls the line-item detail (product/quantity/sellPrice) and writes one row
+per line item to a Smartsheet sheet.
+
+This is a WINDOWED repave, not a full one: only rows whose Ship Date falls
+inside the rolling window (today - LOOKBACK_DAYS through today + LOOKAHEAD_DAYS)
+get deleted and re-inserted each run. Rows older than the lookback window are
+left untouched permanently -- they become a running historical archive that
+never gets erased, while the live window stays fully fresh and accurate
+(status changes, corrections in Harvestpoint, etc. all flow through for
+anything still inside the window).
 
 Auth: same Firebase Identity Toolkit email/password sign-in used by
 harvestpoint-sync / timesheet-confirmation. Each run signs in fresh via
@@ -22,6 +28,7 @@ Required environment variables (set as GitHub Actions secrets):
     SMARTSHEET_SHEET_ID     Target Smartsheet sheet ID (optional, has default below)
 
 Optional:
+    LOOKBACK_DAYS            Override the default 5-day rolling-window lookback
     LOOKAHEAD_DAYS           Override the default 60-day forward window
     TEST_MODE                If "true", print results instead of writing to Smartsheet
 """
@@ -31,6 +38,7 @@ import sys
 import json
 import time
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import requests
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
@@ -46,6 +54,7 @@ load_dotenv()
 
 ORG_ID = "buffalopacking-2022"
 HARVESTPOINT_API_BASE = "https://appv2.harvestpointsoftware.com/api"
+MOUNTAIN = ZoneInfo("America/Denver")
 
 FIREBASE_API_KEY   = os.getenv("FIREBASE_API_KEY")
 HARVESTPOINT_EMAIL = os.getenv("HARVESTPOINT_EMAIL")
@@ -55,6 +64,7 @@ SMARTSHEET_TOKEN = os.getenv("SMARTSHEET_TOKEN")
 DEFAULT_SHEET_ID = 7187353054433156  # "Sales Order Line Items" in Sweet Corn 2026 workspace
 SHEET_ID = int(os.getenv("SMARTSHEET_SHEET_ID", DEFAULT_SHEET_ID))
 
+LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "5"))
 LOOKAHEAD_DAYS = int(os.getenv("LOOKAHEAD_DAYS", "60"))
 TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
 
@@ -218,11 +228,12 @@ class SmartsheetClient:
         resp.raise_for_status()
         return resp.json()["data"]
 
-    def get_all_row_ids(self, sheet_id):
+    def get_all_rows(self, sheet_id):
+        """Return full row data (id + cells) for every row currently on the sheet."""
         resp = self.session.get(f"{self.BASE_URL}/sheets/{sheet_id}", timeout=30)
         resp.raise_for_status()
         sheet = resp.json()
-        return [row["id"] for row in sheet.get("rows", [])]
+        return sheet.get("rows", [])
 
     def delete_rows(self, sheet_id, row_ids):
         # Smartsheet caps DELETE row batches; chunk conservatively.
@@ -261,7 +272,11 @@ class SmartsheetClient:
             resp.raise_for_status()
 
 
-def repave_sheet(smartsheet_token, sheet_id, rows):
+def windowed_repave(smartsheet_token, sheet_id, rows, window_start_date, window_end_date):
+    """Delete + re-insert only the rows whose Ship Date falls inside the
+    rolling window [window_start_date, window_end_date]. Rows with an older
+    Ship Date are left completely untouched -- they accumulate as a
+    permanent historical archive."""
     client = SmartsheetClient(smartsheet_token)
 
     columns = client.get_columns(sheet_id)
@@ -271,11 +286,38 @@ def repave_sheet(smartsheet_token, sheet_id, rows):
     if missing:
         raise RuntimeError(f"Sheet is missing expected columns: {missing}")
 
-    log("Fetching existing row IDs for full repave...")
-    existing_ids = client.get_all_row_ids(sheet_id)
-    if existing_ids:
-        log(f"Deleting {len(existing_ids)} existing rows...")
-        client.delete_rows(sheet_id, existing_ids)
+    ship_date_col_id = column_map["Ship Date"]
+
+    log("Fetching existing rows to determine which fall inside the rolling window...")
+    existing_rows = client.get_all_rows(sheet_id)
+
+    ids_to_delete = []
+    for row in existing_rows:
+        ship_date_val = None
+        for cell in row.get("cells", []):
+            if cell.get("columnId") == ship_date_col_id:
+                ship_date_val = cell.get("value")
+                break
+
+        if not ship_date_val:
+            # No parseable Ship Date -- leave it alone rather than risk
+            # deleting something we can't classify.
+            continue
+
+        try:
+            ship_date = datetime.fromisoformat(str(ship_date_val)).date()
+        except ValueError:
+            continue
+
+        if window_start_date <= ship_date <= window_end_date:
+            ids_to_delete.append(row["id"])
+
+    if ids_to_delete:
+        log(f"Deleting {len(ids_to_delete)} existing rows inside the rolling window "
+            f"({window_start_date} to {window_end_date})...")
+        client.delete_rows(sheet_id, ids_to_delete)
+    else:
+        log("No existing rows fall inside the rolling window -- nothing to delete.")
 
     if rows:
         log(f"Adding {len(rows)} fresh rows...")
@@ -291,7 +333,7 @@ def repave_sheet(smartsheet_token, sheet_id, rows):
 def main():
     print(f"\n{'='*50}")
     print(f"Harvestpoint Sales Orders -> Smartsheet Sync")
-    print(f"Pulling orders with ship date in next {LOOKAHEAD_DAYS} days")
+    print(f"Rolling window: {LOOKBACK_DAYS} days back -> {LOOKAHEAD_DAYS} days forward")
     print(f"{'='*50}\n")
 
     if not FIREBASE_API_KEY or not HARVESTPOINT_EMAIL or not HARVESTPOINT_PASS:
@@ -301,9 +343,19 @@ def main():
         log("ERROR: SMARTSHEET_TOKEN must be set (or run with TEST_MODE=true).")
         sys.exit(1)
 
-    now = datetime.now(timezone.utc)
-    start = now
-    end = now + timedelta(days=LOOKAHEAD_DAYS)
+    # Anchor everything to the START of today in Mountain time (the business's
+    # actual operating timezone), not the exact moment the script happens to
+    # run -- otherwise an order shipping earlier today could fall outside the
+    # window depending on what time the script executes.
+    today_mountain = datetime.now(MOUNTAIN).replace(hour=0, minute=0, second=0, microsecond=0)
+    window_start_date = today_mountain.date() - timedelta(days=LOOKBACK_DAYS)
+    window_end_date = today_mountain.date() + timedelta(days=LOOKAHEAD_DAYS)
+
+    start_dt = today_mountain - timedelta(days=LOOKBACK_DAYS)
+    start = start_dt.astimezone(timezone.utc)
+    # Add a full day to the end date so the entire last calendar day is included.
+    end_dt = today_mountain + timedelta(days=LOOKAHEAD_DAYS + 1)
+    end = end_dt.astimezone(timezone.utc)
 
     # Harvestpoint's action/salesOrder endpoint expects millisecond-precision
     # ISO 8601 with a literal "Z" suffix, matching what the frontend sends.
@@ -325,7 +377,7 @@ def main():
             print(json.dumps(row, default=str))
         return
 
-    repave_sheet(SMARTSHEET_TOKEN, SHEET_ID, rows)
+    windowed_repave(SMARTSHEET_TOKEN, SHEET_ID, rows, window_start_date, window_end_date)
     log("\u2713 Sync complete!")
 
 
