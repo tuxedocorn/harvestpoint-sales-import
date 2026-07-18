@@ -154,12 +154,17 @@ def fetch_line_items(access_token, order_id):
 # ---------------------------------------------------------------------------
 
 def iso_to_smartsheet_date(iso_str):
-    """Convert a Harvestpoint ISO datetime string to YYYY-MM-DD for a Smartsheet DATE column."""
+    """Convert a Harvestpoint ISO datetime string to YYYY-MM-DD for a Smartsheet
+    DATE column, using Mountain time (the business's actual operating timezone)
+    to determine the calendar date -- not raw UTC. Harvestpoint returns
+    timestamps in UTC, so a late-evening Mountain time (e.g. 8pm on 7/20) can
+    already be past midnight UTC (2am on 7/21). Taking .date() straight off the
+    UTC value would incorrectly roll that date forward a day."""
     if not iso_str:
         return None
     try:
         dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
-        return dt.date().isoformat()
+        return dt.astimezone(MOUNTAIN).date().isoformat()
     except ValueError:
         return None
 
