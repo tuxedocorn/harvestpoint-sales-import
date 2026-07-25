@@ -195,7 +195,7 @@ def build_rows(access_token, orders):
             log(f"    (no line items returned for order {order_num})")
             continue
 
-         for item in line_items:
+        for item in line_items:
             product_name = (item.get("product") or {}).get("name")
 
             # "Qty Shipped" comes from the nested inventory[] array, not the
