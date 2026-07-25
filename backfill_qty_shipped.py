@@ -55,12 +55,14 @@ def main():
     log("Fetching all existing rows from the sheet...")
     all_rows = client.get_all_rows(SHEET_ID)
 
-    # Smartsheet omits a cell entirely from the row's cell list when it has
-    # no value -- so "missing from cells_by_col" reliably means "blank".
+    # Smartsheet's raw API includes a cell entry for every column on every
+    # row, even blank ones -- just with no "value" key inside it. So we
+    # check whether the VALUE is None, not whether the column ID merely
+    # appears in the cell list (it always will).
     rows_needing_backfill = []
     for row in all_rows:
         cells_by_col = {c["columnId"]: c.get("value") for c in row.get("cells", [])}
-        if qty_shipped_col_id not in cells_by_col:
+        if cells_by_col.get(qty_shipped_col_id) is None:
             rows_needing_backfill.append(row)
 
     log(f"Found {len(rows_needing_backfill)} rows missing Qty Shipped.")
