@@ -77,6 +77,7 @@ COLUMN_TITLES = [
     "Order Date",
     "Product",
     "Quantity Ordered",
+    "Wty Shipped",
     "Sell Price",
 ]
 
@@ -194,8 +195,23 @@ def build_rows(access_token, orders):
             log(f"    (no line items returned for order {order_num})")
             continue
 
-        for item in line_items:
+         for item in line_items:
             product_name = (item.get("product") or {}).get("name")
+
+            # "Qty Shipped" comes from the nested inventory[] array, not the
+            # top-level quantity field. Each inventory record represents an
+            # inventory action against this line item: "reserve" (allocated
+            # but not yet pulled, pre-shipment) or "consume" (actually pulled
+            # from inventory -- i.e. physically shipped). Sum the consume
+            # records' quantities (stored as negative deductions, hence abs())
+            # in case a line ever ships across multiple inventory pulls. If
+            # no consume records exist yet, the order hasn't shipped.
+            qty_shipped = sum(
+                abs(inv.get("quantity") or 0)
+                for inv in (item.get("inventory") or [])
+                if inv.get("actionType") == "consume"
+            )
+
             rows.append({
                 "Order Num": order_num,
                 "Customer": customer_name,
@@ -204,9 +220,9 @@ def build_rows(access_token, orders):
                 "Order Date": order_date,
                 "Product": product_name,
                 "Quantity Ordered": item.get("quantity"),
+                "Qty Shipped": qty_shipped,
                 "Sell Price": item.get("sellPrice"),
             })
-
         # Light throttling to avoid hammering the API across potentially
         # hundreds of orders in a single run.
         time.sleep(0.1)
