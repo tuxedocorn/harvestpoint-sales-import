@@ -1,0 +1,27 @@
+name: Backfill Qty Shipped (one-time)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run backfill
+        env:
+          FIREBASE_API_KEY: ${{ secrets.FIREBASE_API_KEY }}
+          HARVESTPOINT_EMAIL: ${{ secrets.HARVESTPOINT_EMAIL }}
+          HARVESTPOINT_PASS: ${{ secrets.HARVESTPOINT_PASS }}
+          SMARTSHEET_TOKEN: ${{ secrets.SMARTSHEET_TOKEN }}
+        run: python backfill_qty_shipped.py
