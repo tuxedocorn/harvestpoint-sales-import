@@ -77,7 +77,7 @@ COLUMN_TITLES = [
     "Order Date",
     "Product",
     "Quantity Ordered",
-    "Wty Shipped",
+    "Qty Shipped",
     "Sell Price",
 ]
 
