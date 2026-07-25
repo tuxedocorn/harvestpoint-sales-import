@@ -76,7 +76,7 @@ COLUMN_TITLES = [
     "Ship Date",
     "Order Date",
     "Product",
-    "Quantity",
+    "Quantity Ordered",
     "Sell Price",
 ]
 
@@ -203,7 +203,7 @@ def build_rows(access_token, orders):
                 "Ship Date": ship_date,
                 "Order Date": order_date,
                 "Product": product_name,
-                "Quantity": item.get("quantity"),
+                "Quantity Ordered": item.get("quantity"),
                 "Sell Price": item.get("sellPrice"),
             })
 
